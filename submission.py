@@ -12,7 +12,11 @@ from simulation import SimulationEnvironment
 import evaluation as ev
 import cv2
 import math
+from scipy.optimize import minimize
+from scipy.spatial.transform import Rotation as R # Import for orientation calculations
 
+
+BASE_Z = 0.05715 # 2.25 inches
 width, height = 640, 480
 WINDOW_NAME = "Non-blocking"
 
@@ -24,8 +28,6 @@ class Controller():
         self.show_cv_window = show_cv_window
         self.show_simulation_window = show_simulation_window
         self.joint_names = joint_names
-
-
 
     def _display_cv_window(self, current_image_np):
         if current_image_np is None:
@@ -58,10 +60,315 @@ class Controller():
 
         self.current_image = current_image
 
+    def setup_ik(self, env):
+        self.joint_info = env.get_joint_info()
+        print(f"jotin info: {self.joint_info}")
+
+        # Define the end effector index (we'll use the fixed finger tip, t7f which is at index 5)
+        self.end_effector_index = 5
+
+        # Identify the active joints (those with an axis)
+        self.active_joints = []
+        for i, joint in enumerate(self.joint_info):
+            if joint[4] is not None:  # If axis is not None, it's an active joint
+                self.active_joints.append(i)
+
+        # Joint limits (±90 degrees in radians)
+        self.joint_limits = np.array([[-np.pi/2, np.pi/2]] * len(self.active_joints))
+        print(f"active joints: {self.active_joints}")
+
+    def quaternion_to_rotation_matrix(self, q):
+        """Convert quaternion to rotation matrix"""
+        w, x, y, z = q
+        return np.array([
+            [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+            [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+        ])
+
+    def forward_kinematics(self, joint_angles):
+        """
+        Compute the forward kinematics of the robot.
+
+        Args:
+            joint_angles: List or array of joint angles in radians for active joints
+
+        Returns:
+            End effector position as a numpy array [x, y, z]
+        """
+        # Initialize transformation matrices
+        transforms = [np.eye(4) for _ in range(len(self.joint_info))]
+
+        # Fill in joint angle values for active joints
+        angle_idx = 0
+        for i in range(len(self.joint_info)):
+            if i in self.active_joints:
+                # This joint is active, use the provided angle
+                angle = joint_angles[angle_idx]
+                angle_idx += 1
+            else:
+                # This joint is fixed, angle is always 0
+                angle = 0.0
+
+            # Get joint information
+            _, parent_idx, translation, orientation, axis = self.joint_info[i]
+
+            # Create transformation matrix for this joint
+            transform = np.eye(4)
+
+            # Apply parent's transformation
+            if parent_idx >= 0:
+                transform = transforms[parent_idx].copy()
+
+            # Apply translation
+            translation_matrix = np.eye(4)
+            translation_matrix[:3, 3] = translation
+            transform = transform @ translation_matrix
+
+            # Apply orientation
+            rotation_matrix = self.quaternion_to_rotation_matrix(orientation)
+            orientation_matrix = np.eye(4)
+            orientation_matrix[:3, :3] = rotation_matrix
+            transform = transform @ orientation_matrix
+
+            # Apply joint rotation if this is an active joint
+            if axis is not None:
+                # Create rotation matrix around the axis
+                c = np.cos(angle)
+                s = np.sin(angle)
+                x, y, z = axis
+
+                # Rodrigues' rotation formula to get rotation matrix from axis and angle
+                cross_product_matrix = np.array([
+                    [0, -z, y],
+                    [z, 0, -x],
+                    [-y, x, 0]
+                ])
+
+                R = np.eye(3) * c + (1 - c) * np.outer(axis, axis) + s * cross_product_matrix
+
+                joint_rotation = np.eye(4)
+                joint_rotation[:3, :3] = R
+
+                transform = transform @ joint_rotation
+
+            transforms[i] = transform
+
+        # Return the position of the end effector
+        return transforms[self.end_effector_index][:3, 3]
+
+    def objective_function(self, joint_angles, target_position):
+        """
+        Calculate the error between current end effector position and target position.
+        This is the function we want to minimize.
+
+        Args:
+            joint_angles: Current joint angles
+            target_position: Target position for the end effector
+
+        Returns:
+            Squared Euclidean distance between current and target positions
+        """
+        current_position = self.forward_kinematics(joint_angles)
+        return np.sum((current_position - target_position) ** 2)
+
+    def inverse_kinematics_fn(self, goal_pose, current_joint_angles_degrees=None,debug_info=False):
+        """
+        Solves the inverse kinematics problem for a goal pose, with updated coordinate transformation
+        to correct the diagonal opposite movement issue.
+
+        Args:
+            goal_pose: A tuple with ((x,y,z), (qw,qx,qy,qz)) format
+            current_joint_angles_degrees: Current joint angles in degrees
+        Returns:
+            Dictionary with joint angle values in degrees
+        """
+        if(debug_info):
+            print(f"Processing goal pose: {goal_pose}")
+
+        # Extract position and orientation from the tuple
+        original_position = np.array(goal_pose[0])
+        orientation = np.array(goal_pose[1])
+
+        # Updated coordinate transformation: flip both x and y
+        position = np.array([
+            original_position[0],    # Negate x
+            original_position[1],    # Negate y
+            original_position[2] - BASE_Z      # z stays the same
+            # original_position[2] # z stays the same
+        ])
+
+        if(debug_info):
+            print(f"Original target position: {original_position}")
+            print(f"Transformed target position (flipped x and y): {position}")
+
+        # Extract target position (ignore orientation for now)
+        target_position = position
+
+        # Define bounds for optimization (joint limits: ±90 degrees)
+        bounds = self.joint_limits
+
+        # If current joint angles are provided, use them as initial guess
+        # Otherwise, start from zero angles
+        if current_joint_angles_degrees is None:
+            initial_guess = np.zeros(len(self.active_joints))
+        else:
+            # Convert the provided angles from degrees to radians
+            try:
+                # Handle if it's a dictionary
+                if isinstance(current_joint_angles_degrees, dict):
+                    initial_guess = np.array([math.radians(angle) for angle in current_joint_angles_degrees.values()])
+                else:
+                    # Handle if it's already an iterable of values
+                    initial_guess = np.array([math.radians(angle) for angle in current_joint_angles_degrees])
+            except (TypeError, AttributeError):
+                # Fallback if conversion fails
+                initial_guess = np.zeros(len(self.active_joints))
+
+
+            if(debug_info):
+                print(f"initial guess: {initial_guess}")
+            # Ensure initial guess is the right length
+            if len(initial_guess) != len(self.active_joints):
+                initial_guess = np.zeros(len(self.active_joints))
+
+        # Try multiple initial guesses if needed to avoid local minima
+        best_result = None
+        best_error = float('inf')
+
+        # List of initial guesses to try (current angles plus some alternatives)
+        initial_guesses = [initial_guess]
+
+        # Add some predefined initial configurations that might help avoid local minima
+        initial_guesses.append(np.zeros(len(self.active_joints)))  # Zero configuration
+
+        # Try different reasonable starting configurations based on the robot anatomy
+        elbow_up = np.zeros(len(self.active_joints))
+        elbow_up[1] = np.radians(45)  # Assuming joint 1 is shoulder
+        initial_guesses.append(elbow_up)
+
+        elbow_down = np.zeros(len(self.active_joints))
+        elbow_down[1] = np.radians(-45)  # Assuming joint 1 is shoulder
+        initial_guesses.append(elbow_down)
+
+        # Try each initial guess
+        for guess in initial_guesses:
+            result = minimize(
+                fun=self.objective_function,
+                x0=guess,
+                args=(target_position,),
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'ftol': 1e-5, 'maxiter': 1000}
+            )
+
+            # Calculate error for this result
+            error = result.fun
+
+            # Keep the best result
+            if error < best_error:
+                best_error = error
+                best_result = result
+
+        # Get the optimized joint angles in radians from the best result
+        joint_angles_rad = best_result.x
+
+        # Convert to degrees
+        joint_angles_deg = np.degrees(joint_angles_rad)
+
+        # Clip to ensure within ±90 degree limits
+        joint_angles_deg = np.clip(joint_angles_deg, -90, 90)
+
+        # Format the result as a dictionary
+        joint_dict = {}
+        for i, joint_idx in enumerate(self.active_joints):
+            joint_name = self.joint_info[joint_idx][0]
+            joint_dict[joint_name] = float(joint_angles_deg[i])
+
+        if(debug_info):
+            print(f"Target position error: {best_error}")
+            print(f"Joint solution: {joint_dict}")
+
+        # Return the joint dictionary with angles
+        return joint_dict
+
+    def add_gripper_offset_to_poses(self, goal_poses_dict):
+        CUBE_SIDE = 0.01905 # .75 inches
+        dx = CUBE_SIDE / 2.0 + 0.01
+        dy = - (CUBE_SIDE / 2.0) + 0.01
+        dz = 0.0
+
+        modified_poses_dict = {}
+
+        for key, pose_value in goal_poses_dict.items():
+
+            original_pos_tuple = pose_value[0]
+            original_orient_tuple = pose_value[1] # Keep original orientation
+
+            # Position calculations
+            original_x = original_pos_tuple[0]
+            original_y = original_pos_tuple[1]
+            original_z = original_pos_tuple[2]
+
+            new_x = original_x + dx
+            new_y = original_y + dy
+            new_z = original_z + dz
+            new_pos_tuple = (new_x, new_y, new_z)
+            new_pose_value = (new_pos_tuple, original_orient_tuple)
+
+            # Add the modified pose to the new dictionary with the original key
+            modified_poses_dict[key] = new_pose_value
+
+        return modified_poses_dict
+
     def run(self,env, goal_poses):
         # TODO: Order changes for waypoint map
 
         self.client_id = env.client_id
+        # print(f"goal_poses: {goal_poses}")
+
+        self.setup_ik(env)
+        #modify positions of blocks to be able to avoid gripper collision
+        # for key, value in goal_poses.items():
+        #     print(f"key: {key}, value: {value}\n")
+
+        goal_poses = self.add_gripper_offset_to_poses(goal_poses)
+
+
+        print("~~~~~~~~~~~~~ GRIPPER OFFSET ~~~~~~~~~~~~~ ")
+
+        for key, value in goal_poses.items():
+            print(f"key: {key}, value: {value}")
+        print("\n")
+
+        goal_poses = self.insert_intermediate_poses(goal_poses)
+        print("~~~~~~~~~~~~~ INTERLEAVED POSES ~~~~~~~~~~~~~ ")
+        for key, value in goal_poses.items():
+            print(f"key: {key}, value: {value}")
+        print("\n")
+
+        # for key, value in goal_poses.items():
+        #     print(f"key: {key}, value: {value}\n")
+
+        # print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
+
+        for key, value in goal_poses.items():
+            print(f"key: {key}, value: {value}\n")
+            op = self.inverse_kinematics_fn(value,env.get_current_angles(),debug_info=False)
+            # print(f"op: {op}")
+            env.goto_position(op,5)
+            env.settle(10)
+
+        accuracy, loc_errors, rot_errors = ev.evaluate(env, goal_poses)
+
+        # env.close()
+
+        print(f"\n{int(100*accuracy)}% of blocks near correct goal positions")
+        print(f"mean|max location error = {np.mean(loc_errors):.3f}|{np.max(loc_errors):.3f}")
+        print(f"mean|max rotation error = {np.mean(rot_errors):.3f}|{np.max(rot_errors):.3f}")
+
+        input("Press [Enter] if you are not gay...")
+        exit()
 
         # get end effector idx for querying position
         for idx in range (pb.getNumBodies()):
@@ -71,7 +378,7 @@ class Controller():
                 # print("True, ", idx)
                 for jnt_num in range(pb.getNumJoints(idx)):
                     joint_info = pb.getJointInfo(idx, jnt_num)
-                    print(joint_info)
+                    # print(joint_info)
                     if(joint_info[1] == b't7f'):
                         print("Found end effector jnt index")
                         self.tracking_end_eff_main_body_uid = pb.getBodyUniqueId(idx)
@@ -91,7 +398,7 @@ class Controller():
         # print("current pos: ", self._current_block_positions)
 
 
-        print("state saved [id]: ", env.initial_state_id)
+        # print("state saved [id]: ", env.initial_state_id)
         goal_pos_idx = self.get_stack_towers("goals", self._goal_block_positions,sort_by_z_height=False) # NOTE: Change to true if you fuck up
         curr_pos_idx = self.get_stack_towers("current", self._current_block_positions,sort_by_z_height=False) # Currnet state does not need z-height sort
 
@@ -105,6 +412,8 @@ class Controller():
         self.simulate_moves_with_state(goal_pos_idx, curr_pos_idx, len(moves))
         print(f"goal_pos_idx :f{goal_pos_idx}")
         print(f"curr_pos_idx :f{curr_pos_idx}")
+
+
 
         input("Press [Enter] if you are not gay...")
 
@@ -140,9 +449,6 @@ class Controller():
 
         if self.show_cv_window:
             cv2.destroyAllWindows()
-
-    def _positon_test(self,env, goal_poses):
-        print(f"pos: {goal_poses}")
 
     def get_stack_towers(self, name ,current_block_positions, sort_by_z_height):
         # print(current_block_positions)
@@ -526,10 +832,79 @@ class Controller():
         # Clean up
         cv2.destroyAllWindows()
 
+    def insert_intermediate_poses(self, goal_poses):
+        """
+        Insert intermediate poses between each pair of blocks in goal_poses.
+
+        For each pair (b1, b2), (b2, b3), etc., insert (i1, i2), (i3, i4), etc.
+        where i1 has the same x,y as b1 but z=0.2, and i2 has the same x,y as b2 but z=0.2.
+
+        Args:
+            goal_poses: Dictionary of block poses {block_name: ((x, y, z), (qx, qy, qz, qw))}
+
+        Returns:
+            Dictionary with intermediate poses inserted
+        """
+        # Sort block names by number
+        block_names = sorted(goal_poses.keys(), key=lambda x: int(x[1:]))
+
+        # Create new dictionary to store results
+        new_poses = {}
+
+        # Process all blocks except the last one
+        for i in range(len(block_names) - 1):
+            current_block = block_names[i]
+            next_block = block_names[i+1]
+
+            # Add the current block
+            new_poses[current_block] = goal_poses[current_block]
+
+            # Get positions and orientations
+            current_pos, current_orient = goal_poses[current_block]
+            next_pos, next_orient = goal_poses[next_block]
+
+            # Create intermediate poses with z=0.2
+            i1_name = f"i{2*i+1}"
+            i2_name = f"i{2*i+2}"
+
+            # i1 has same x,y as current_block but z=0.2, same orientation
+            i1_pos = (current_pos[0], current_pos[1], 0.2)
+            i1_orient = current_orient
+
+            # i2 has same x,y as next_block but z=0.2, same orientation
+            i2_pos = (next_pos[0], next_pos[1], 0.2)
+            i2_orient = next_orient
+
+            # Add intermediate poses
+            new_poses[i1_name] = (i1_pos, i1_orient)
+            new_poses[i2_name] = (i2_pos, i2_orient)
+
+        # Add the last block
+        new_poses[block_names[-1]] = goal_poses[block_names[-1]]
+
+        return new_poses
+
+
+
 if __name__ == "__main__":
 
-    # --- Controller Initialization ---
-    controller = Controller(show_simulation_window =False)
+    controller = Controller(show_simulation_window = True)
 
-    env, goal_poses = ev.sample_trial(num_blocks=20, num_swaps=15, show=controller.show_simulation_window)
+    env, goal_poses = ev.sample_trial(num_blocks=2, num_swaps=0, show=controller.show_simulation_window)
+    print(f"goal_poses:{goal_poses}")
+
+    BASE_Z = 0.05715 # 2.25 inches
+    # env._add_block((.0682, 0, -.1066 + BASE_Z), (0,0,0,1), mass = 0, side=0.2032)
+    # env._add_block((0, .0682, -.1066 + BASE_Z), (0,0,0,1), mass = 0, side=0.2032)
+    # env.settle(1.0)
+    # goal_poses[0] = ((.0682, 0, -.1066 + BASE_Z), (0,0,0,1))
+    # goal_poses[1] = ((0, .0682, -.1066 + BASE_Z), (0,0,0,1))
     controller.run(env, goal_poses)
+
+    accuracy, loc_errors, rot_errors = evaluate(env, goal_poses)
+
+    # env.close()
+
+    print(f"\n{int(100*accuracy)}% of blocks near correct goal positions")
+    print(f"mean|max location error = {np.mean(loc_errors):.3f}|{np.max(loc_errors):.3f}")
+    print(f"mean|max rotation error = {np.mean(rot_errors):.3f}|{np.max(rot_errors):.3f}")
