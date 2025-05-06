@@ -82,7 +82,7 @@ class Controller():
                                       [-np.pi/3, np.pi/3], # (jnt_idx:1) is horixontal x axis of 2nd motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:2) is horixontal x axis of 3rd motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:3) is vertical z axis of 4th motor
-                                      [0       , np.pi/2], # (jnt_idx:4) is horixontal x axis of 5th motor
+                                      [-np.pi/2, np.pi/2], # (jnt_idx:4) is horixontal x axis of 5th motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:6) is gripper tip axis of 6th motor
         ])
         print(f"joint_limits: {self.joint_limits}")
@@ -332,17 +332,15 @@ class Controller():
 
         return modified_poses_dict
 
-    def close_grip(self):
-        env.settle(10)
-        pb.setJointMotorControl2(
-            env.robot_id,
-            jointIndex = 6,
-            controlMode = env.control_mode,
-            targetPosition = -0.14,
-            targetVelocity = 0,
-            positionGain = 1.5, # important for position accuracy
-        )
-        env.settle(10)
+    def toggle_grip(self,close=False):
+        op = env.get_current_angles()
+        env.settle(1)
+        if(close):
+            op["m6"] =-15
+        else:
+            op["m6"] =0
+        env.goto_position(op,1)
+        env.settle(2)
 
     def calculate_top_positions(self, curr_tower_idx, curr_pos):
         """
@@ -529,21 +527,31 @@ class Controller():
                 print(f"key: {key}, value: {value[0]}")
         print("\n")
 
+        # print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
         print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
-        exit()
 
-        print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
-        print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
+        # self.toggle_grip(True)
+        # env.settle(10)
+        # self.toggle_grip(False)
+        # env.settle(1000)
+        # exit()
 
         self.op_old = None
+        gripper_state = 0.0
         for key, value in goal_poses.items():
             print(f"key: {key}, value: {value}")
-            if(key[0]=='c' or 'o'):
+            if(key[0]=='c'):
                 op = self.op_old
-                self.close_grip()
+                self.toggle_grip(True)
+                gripper_state = op["m6"]
+            elif(key[0]=='o'):
+                op = self.op_old
+                self.toggle_grip(False)
+                gripper_state = op["m6"]
             else:
-                op = self.inverse_kinematics_fn(value,env.get_current_angles(),debug_info=False)
+                op = self.inverse_kinematics_fn(value ,env.get_current_angles(),debug_info=False)
                 self.op_old = op
+                op["m6"] = gripper_state
                 print(f"op: {op}\n")
             env.goto_position(op,5)
             # self.close_grip()
@@ -561,36 +569,6 @@ class Controller():
         print(f"\n{int(100*accuracy)}% of blocks near correct goal positions")
         print(f"mean|max location error = {np.mean(loc_errors):.3f}|{np.max(loc_errors):.3f}")
         print(f"mean|max rotation error = {np.mean(rot_errors):.3f}|{np.max(rot_errors):.3f}")
-
-
-        while timestep_count < total_timesteps:
-
-            # print("timestep: ",)
-            # --- Agent Interaction Step ---
-            # Get action, log_prob, value from the policy
-            action_np, action_tensor_cpu, log_prob_cpu, value_cpu = self.get_action_and_value(current_image_np, current_joint_state_np)
-            # print("action_np: ", action_np)
-
-
-            # tracking the end effector of robot arm:
-            self._tracking_debug_line = \
-                pb.getLinkState(bodyUniqueId = self.tracking_end_eff_main_body_uid,
-                               linkIndex = self.tracking_end_eff_jnt_idx)[0]
-
-
-            # --- Environment Step ---
-            env.goto_position(action_np, 0.3)  # 0.3 seconds
-
-            self.addLine(); # tracking the end effector of robot arm:
-
-            # --- OpenCV Display ---
-            if self.show_cv_window:
-                raw_image_for_display = current_image_np.copy()
-                if not self._display_cv_window(raw_image_for_display):
-                    break # Stop training if 'q' is pressed
-
-        if self.show_cv_window:
-            cv2.destroyAllWindows()
 
     def get_stack_towers(self, name ,current_block_positions, sort_by_z_height):
         # print(current_block_positions)
