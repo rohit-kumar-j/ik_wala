@@ -82,7 +82,7 @@ class Controller():
                                       [-np.pi/3, np.pi/3], # (jnt_idx:1) is horixontal x axis of 2nd motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:2) is horixontal x axis of 3rd motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:3) is vertical z axis of 4th motor
-                                      [-np.pi/2, np.pi/2], # (jnt_idx:4) is horixontal x axis of 5th motor
+                                      [0       , np.pi/2], # (jnt_idx:4) is horixontal x axis of 5th motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:6) is gripper tip axis of 6th motor
         ])
         print(f"joint_limits: {self.joint_limits}")
@@ -427,8 +427,8 @@ class Controller():
 
         self.initial_state_tower_bases = self._get_tower_bases(curr_pos_idx)
 
-        print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
-        print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
+        # print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
+        # print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
         temp_towers = [
                         ('t1',((0.12, -0.09, CUBE_SIDE/2), (0,0,0,1))),
                         ('t2',((0.09, -0.12, CUBE_SIDE/2), (0,0,0,1))),
@@ -436,8 +436,8 @@ class Controller():
                         ('t4',((-0.09,-0.12, CUBE_SIDE/2), (0,0,0,1))),
                       ]
         self.initial_state_tower_bases = self.initial_state_tower_bases + temp_towers
-        print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
-        print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
+        # print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
+        # print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
 
         # NOTE: Add these to the tower solver
         # env._add_block((0.12, -0.09, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t1
@@ -448,9 +448,42 @@ class Controller():
         # Put this in for loop to iteratively calculte:
         #           empty position (x,y,z) of every tower &
         #           top block position (x,y,z) of every tower
-        top_block_loc = self.calculate_top_positions(curr_pos_idx,
-                                                     self._current_block_positions
-                                                    )
+
+        # update topblock_positions at the start
+        # top_block_loc = self.calculate_top_positions(curr_pos_idx,
+        #                                              self._current_block_positions
+        #                                             )
+        # print(top_block_loc,"\n")
+
+        moves = self.tower_rearrangement_solver(goal_pos_idx, curr_pos_idx)
+        # state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
+        # print(moves)
+        # print(optimized_moves)
+
+        # self.state = state
+
+        # for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
+        #     print("\nSTATE: #####################################")
+        #     print(f"move[0]:{optimized_moves[idx]}\n")
+        #
+        #     print(f"before state:{state}")
+        #     top_cubes = self.get_top_cubes(self.state)
+        #     print(f"top_cubes_before: {top_cubes}")
+        #     source_name = f"l{source_idx+1}" if source_idx < len(goal_pos_idx) else f"t{source_idx - len(goal_pos_idx) + 1}"
+        #
+        #     dest_name = f"l{dest_idx+1}" if dest_idx < len(goal_pos_idx) else f"t{dest_idx - len(goal_pos_idx) + 1}"
+        #     block = self.state[source_idx].pop()
+        #     self.state[dest_idx].append(block)
+        #     print("MOVE <<------------>> ")
+        #     print(f"Move {idx+1}: From {source_name} to {dest_name} (Block {block})")
+        #     print(f"after state:{state}")
+        #     # Move the block
+        #     # STATE
+        #     #calculte top blocks
+        #     top_cubes = self.get_top_cubes(self.state)
+        #     print(f"top_cubes_after: {top_cubes}")
+        #     print("----------------------------------------------")
+
         # Give the positions for l1,l2,...; t1,t2,...
         # l1,l2 are towers; t1,t2... are temporary positions
 
@@ -458,11 +491,18 @@ class Controller():
         # top_block_loc = [l1_pos,l2_pos,l3_pos,...ln_pos]
         # empty_slots = top_block_loc + CUBE_SIDE/2
 
-        moves = self.tower_rearrangement_solver(goal_pos_idx, curr_pos_idx)
 
         print(f"Moves required: {len(moves)}")
         for move in moves:
             print(f"Move from {move[0]} to {move[1]}")
+            # state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
+            # for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
+            #     print(f"state:{state}")
+            #     print(f"special: idx={idx}, source_idx={source_idx}, dest_idx={dest_idx}")
+            #
+            #     top_cubes = self.get_top_cubes(state)
+            #     print(f"final:######## {top_cubes}")
+            #     print("--------------------------------------")
 
 
         simulate_moves = True
@@ -470,14 +510,9 @@ class Controller():
             self.simulate_moves_with_state(goal_pos_idx, curr_pos_idx, len(moves))
             print(f"goal_pos_idx :f{goal_pos_idx}")
             print(f"curr_pos_idx :f{curr_pos_idx}")
-        # for move in len(moves):
-            # Select the moves necessary
+        print("----------------------------------------------")
 
 
-        env.settle(1000)
-
-        input("Press [Enter] if you are not gay...")
-        exit()
 
         print("~~~~~~~~~~~~~ GRIPPER OFFSET ~~~~~~~~~~~~~ ")
 
@@ -488,24 +523,34 @@ class Controller():
         goal_poses = self.insert_intermediate_poses(goal_poses)
         print("~~~~~~~~~~~~~ INTERLEAVED POSES ~~~~~~~~~~~~~ ")
         for key, value in goal_poses.items():
-            print(f"key: {key}, value: {value}")
+            if value==None:
+                print(f"key: {key}, value: {value}")
+            else:
+                print(f"key: {key}, value: {value[0]}")
         print("\n")
 
-        # for key, value in goal_poses.items():
-        #     print(f"key: {key}, value: {value}\n")
+        print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
+        exit()
 
         print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
+        print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
 
+        self.op_old = None
         for key, value in goal_poses.items():
-            print(f"key: {key}, value: {value}\n")
-            op = self.inverse_kinematics_fn(value,env.get_current_angles(),debug_info=False)
-            print(f"op: {op}")
+            print(f"key: {key}, value: {value}")
+            if(key[0]=='c' or 'o'):
+                op = self.op_old
+                self.close_grip()
+            else:
+                op = self.inverse_kinematics_fn(value,env.get_current_angles(),debug_info=False)
+                self.op_old = op
+                print(f"op: {op}\n")
             env.goto_position(op,5)
             # self.close_grip()
-            env.settle(10)
+            env.settle(1)
             # Make a mechanism
 
-
+        env.settle(1000)
         input("Press [Enter] if you are not gay...")
         exit()
 
@@ -873,7 +918,6 @@ class Controller():
 
         return state, optimized_moves
 
-
     def _get_tower_bases(self, state):
         """
             Returns the list of the cubes which are on bottom of towers
@@ -881,30 +925,35 @@ class Controller():
             NOTE: This is to be called at the beginning so that we can get the x,y
             positions of the tower bases
         """
-        print(f"state >>> : {state}")
+        # print(f"state >>> : {state}")
         tower_bases = []
         for tower in range(len(state)):
             if(len(state[tower])>0):
-                print(f"tower >>> : {state[tower][0]}")
+                # print(f"tower >>> : {state[tower][0]}")
                 block_name = f'b{state[tower][0]+1}'
-                print(f"tower {block_name} pos: {self.env.get_block_pose(block_name)}")
+                # print(f"tower {block_name} pos: {self.env.get_block_pose(block_name)}")
                 tower_bases.append((block_name, self.env.get_block_pose(block_name)))
             else:
-                print(f"Empty tower {tower+1} ...... adding from intial_state to e{tower+1}: {self.initial_state_tower_bases[tower]}")
+                # print(f"Empty tower {tower+1} ...... adding from intial_state to e{tower+1}: {self.initial_state_tower_bases[tower]}")
                 pos = self.initial_state_tower_bases[tower][1][0]
-                print(f"pos: {pos}")
+                # print(f"pos: {pos}")
                 orn = self.initial_state_tower_bases[tower][1][1]
-                print(f"orn: {orn}")
+                # print(f"orn: {orn}")
                 tower_bases.append((f'e{tower+1}', (pos,orn)))
 
         return tower_bases
 
     def get_top_cubes(self, state):
         """ Returns the list of the cubes which are on top of towers"""
-        print(f"state#############: {state}")
+        # NOTE: Add these to the tower solver
+        # env._add_block((0.12, -0.09, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t1
+        # env._add_block((0.09, -0.12, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t2
+        # env._add_block((-0.12,-0.09, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t3
+        # env._add_block((-0.09,-0.12, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t4
+        # print(f"state#############: {state}")
         bottom_of_current_towers = self._get_tower_bases(state)
         # This is the original state: self.initial_state_tower_bases
-        print(f"bottom_of_current_towers : {bottom_of_current_towers }")
+        # print(f"bottom_of_current_towers : {bottom_of_current_towers }")
 
         pose_state_of_blocks =[]
         for tower in state:
@@ -920,12 +969,13 @@ class Controller():
         top_cubes = []
         for tower in range(len(pose_state_of_blocks)):
             try:
-                print(f"tower: {pose_state_of_blocks[tower][-1]}")
+                # print(f"tower: {pose_state_of_blocks[tower][-1]}")
                 top_cubes.append(pose_state_of_blocks[tower][-1])
             except:
-                print(f"Tower {tower + 1} is empty, skipping............")
+                # print(f"Tower {tower + 1} is empty, skipping............")
                 top_cubes.append((bottom_of_current_towers[tower])) # Add empty if there is no tower # TODO: Change this to be able to add empty tower base positions
-        print(f"top_cubes: {top_cubes}")
+        # print(f"top_cubes: {top_cubes}")
+        return top_cubes
 
     def simulate_moves_with_state(self,goal_towers, current_towers, moves_to_show):
 
@@ -952,7 +1002,8 @@ class Controller():
             block = state[source_idx].pop()
             state[dest_idx].append(block)
 
-            self.get_top_cubes(state)
+            top_cubes = self.get_top_cubes(state)
+            print(f"top_cubes: {top_cubes}")
 
             print(f"Move {idx+1}: From {source_name} to {dest_name} (Block {block})")
 
@@ -1014,11 +1065,11 @@ class Controller():
         # block_names = sorted(goal_poses.keys(), key=lambda x: int(x[1:]))
         # print(f"block_names: {block_names}")
         block_names = list(goal_poses.keys())
-        # print(f"block_names: {block_names}")
 
         # Create new dictionary to store results
         new_poses = {}
 
+        gripper_state = "close" # False is open, True is closed
         # Process all blocks except the last one
         for i in range(len(block_names) - 1):
             current_block = block_names[i]
@@ -1037,11 +1088,11 @@ class Controller():
 
             # NOTE: Sequence:
             # # ... Moves to b1, where there is a block
-            # g1_name = f"g{2*i+1}" # Grip the block
+            # g_name = "c" # Grip the block
             # i1_name = f"i{2*i+1}" # Move to intermediate pt 1
             # i2_name = f"i{2*i+2}" # Move to intermediate pt 2
             # # ... Moves to b2, where there is a block
-            # g2_name = f"g{2*i+2}" # Ungrip the block at pt 2
+            # g_name = "o" # Ungrip the block at pt 2
             # # ... Moves to i3
             # # ... Moves to i4
             # # ... Moves to b3, where there is a block
@@ -1061,13 +1112,53 @@ class Controller():
         # Add the last block
         new_poses[block_names[-1]] = goal_poses[block_names[-1]]
 
-        return new_poses
+        print(new_poses)
+        print(new_poses.keys())
+        original_b_names = [name for name in block_names if name.startswith('b')]
 
+        # Create the new list
+        modified_block_names = []
+        grip_state = "o"
 
+        final_dict = {}
+
+        i=1
+        for key in new_poses.keys():
+            # print(f"key:{key}")
+            if(key[0]=="b"):
+                modified_block_names.append(key)
+                if(grip_state=="c"):
+                    modified_block_names.append(f'o{i}')
+                    grip_state = 'o'
+                else:
+                    modified_block_names.append(f'c{i}')
+                    grip_state = 'c'
+                # print("add grip")
+            else: # key == i
+                modified_block_names.append(key)
+            i+=1
+        modified_block_names.append('k')
+        # print(f"modified_block_names; {modified_block_names}")
+
+        for key in modified_block_names:
+            if(key[0]=='b' or key[0]=='i'):
+                # print(key)
+                final_dict[key] = new_poses[key]
+            else:
+                # print("c/o/k")
+                final_dict[key] = "gripper"
+        # print(new_poses.keys())
+        # print(final_dict.keys())
+        # print("--------------------------------------------")
+        # print(new_poses)
+        # print(final_dict)
+        # print("--------------------------------------------")
+
+        return final_dict
 
 if __name__ == "__main__":
 
-    controller = Controller(show_simulation_window = False)
+    controller = Controller(show_simulation_window = True)
 
     env, goal_poses = ev.sample_trial(num_blocks=10, num_swaps=4, show=controller.show_simulation_window)
     print(f"goal_poses:{goal_poses}")
