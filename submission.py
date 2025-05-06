@@ -270,7 +270,7 @@ class Controller():
                 args=(target_position,),
                 method='L-BFGS-B',
                 bounds=bounds,
-                options={'ftol': 1e-5, 'maxiter': 1000}
+                options={'ftol': 1e-6, 'maxiter': 10000}
             )
 
             # Calculate error for this result
@@ -306,7 +306,7 @@ class Controller():
     def add_gripper_offset_to_poses(self, goal_poses_dict):
         CUBE_SIDE = 0.01905 # .75 inches
         dx = CUBE_SIDE / 2.0 + 0.01
-        dy = - (CUBE_SIDE / 2.0) + 0.01
+        dy = 0 #-(CUBE_SIDE / 2.0) - 0.01
         dz = 0.0
 
         modified_poses_dict = {}
@@ -332,15 +332,16 @@ class Controller():
 
         return modified_poses_dict
 
-    def toggle_grip(self,close=False):
-        op = env.get_current_angles()
+    def toggle_grip(self,ip,close=False):
+        op = ip
         env.settle(1)
         if(close):
-            op["m6"] =-15
+            op["m6"] =-10
         else:
             op["m6"] =0
         env.goto_position(op,1)
         env.settle(2)
+        return op
 
     def calculate_top_positions(self, curr_tower_idx, curr_pos):
         """
@@ -530,32 +531,26 @@ class Controller():
         # print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
         print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
 
-        # self.toggle_grip(True)
-        # env.settle(10)
-        # self.toggle_grip(False)
-        # env.settle(1000)
-        # exit()
-
         self.op_old = None
         gripper_state = 0.0
         for key, value in goal_poses.items():
             print(f"key: {key}, value: {value}")
             if(key[0]=='c'):
                 op = self.op_old
-                self.toggle_grip(True)
+                op = self.toggle_grip(op, True)
                 gripper_state = op["m6"]
             elif(key[0]=='o'):
                 op = self.op_old
-                self.toggle_grip(False)
+                op = self.toggle_grip(op, False)
                 gripper_state = op["m6"]
-            else:
+            if(key[0]=="b" or key[0]=="i"):
                 op = self.inverse_kinematics_fn(value ,env.get_current_angles(),debug_info=False)
                 self.op_old = op
                 op["m6"] = gripper_state
                 print(f"op: {op}\n")
             env.goto_position(op,5)
             # self.close_grip()
-            env.settle(1)
+            env.settle(2)
             # Make a mechanism
 
         env.settle(1000)
@@ -1138,7 +1133,7 @@ if __name__ == "__main__":
 
     controller = Controller(show_simulation_window = True)
 
-    env, goal_poses = ev.sample_trial(num_blocks=10, num_swaps=4, show=controller.show_simulation_window)
+    env, goal_poses = ev.sample_trial(num_blocks=2, num_swaps=1, show=controller.show_simulation_window)
     print(f"goal_poses:{goal_poses}")
 
     BASE_Z = 0.05715 # 2.25 inches
