@@ -4,18 +4,19 @@ Implement Controller class with your motion planner
 """
 import numpy as np
 import collections
+from collections import defaultdict
 import copy
 import heapq
 import matplotlib.pyplot as pt
 import pybullet as pb
 from simulation import SimulationEnvironment
-import evaluation as ev
 import cv2
 import math
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R # Import for orientation calculations
 
 
+CUBE_SIDE = 0.01905 # .75 inches
 BASE_Z = 0.05715 # 2.25 inches
 width, height = 640, 480
 WINDOW_NAME = "Non-blocking"
@@ -62,6 +63,18 @@ class Controller():
 
     def setup_ik(self, env):
         self.joint_info = env.get_joint_info()
+        self.joint_info = list(self.joint_info)
+
+        # Apply offset to 't7f' (assuming it's at index 5 based on your provided joint_info)
+        name, parent_idx, translation, orientation, axis = self.joint_info[5]
+        # Create new translation tuple with x-offset
+        new_translation = (translation[0]-0.010 , translation[1]+0.017 , translation[2]-0.014)
+        # Update the joint info with the modified translation
+        self.joint_info[5] = (name, parent_idx, new_translation, orientation, axis)
+
+        # Convert back to tuple to maintain immutability if needed
+        self.joint_info = tuple(self.joint_info)
+
         print(f"jotin info: {self.joint_info}")
 
         # Define the end effector index (we'll use the fixed finger tip, t7f which is at index 5)
@@ -78,11 +91,14 @@ class Controller():
 
         # Joint limits (±90 degrees in radians)
         self.joint_limits = np.array([
-                                      [-np.pi/2, np.pi/2], # (jnt_idx:0) is vertical z axis of 1st motor
-                                      [-np.pi/3, np.pi/3], # (jnt_idx:1) is horixontal x axis of 2nd motor
+                                      [-np.pi/3, np.pi/3], # (jnt_idx:0) is vertical z axis of 1st motor
+                                      [-np.pi/2, np.pi/2], # (jnt_idx:1) is horixontal x axis of 2nd motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:2) is horixontal x axis of 3rd motor
-                                      [-np.pi/2, np.pi/2], # (jnt_idx:3) is vertical z axis of 4th motor
-                                      [-np.pi/2, np.pi/2], # (jnt_idx:4) is horixontal x axis of 5th motor
+
+                                      [0,0], # (jnt_idx:3) is vertical z axis of 4th motor
+                                      # [-np.pi/2, np.pi/2], # (jnt_idx:3) is vertical z axis of 4th motor
+
+                                      [-np.pi/3, np.pi/3], # (jnt_idx:4) is horixontal x axis of 5th motor
                                       [-np.pi/2, np.pi/2], # (jnt_idx:6) is gripper tip axis of 6th motor
         ])
         print(f"joint_limits: {self.joint_limits}")
@@ -268,9 +284,11 @@ class Controller():
                 fun=self.objective_function,
                 x0=guess,
                 args=(target_position,),
+                # method='trust-constr',
                 method='L-BFGS-B',
                 bounds=bounds,
-                options={'ftol': 1e-6, 'maxiter': 10000}
+                options={'ftol': 1e-8, 'maxiter': 10000}
+                # options={'xtol': 1e-9, 'gtol': 1e-9, 'maxiter': 100000}
             )
 
             # Calculate error for this result
@@ -307,7 +325,7 @@ class Controller():
         CUBE_SIDE = 0.01905 # .75 inches
         dx = CUBE_SIDE / 2.0 + 0.01
         dy = 0 #-(CUBE_SIDE / 2.0) - 0.01
-        dz = 0.0
+        dz = -0.01
 
         modified_poses_dict = {}
 
@@ -334,13 +352,21 @@ class Controller():
 
     def toggle_grip(self,ip,close=False):
         op = ip
-        env.settle(1)
+        # env.settle(1)
         if(close):
-            op["m6"] =-10
+            op["m6"] =-12
         else:
             op["m6"] =0
-        env.goto_position(op,1)
-        env.settle(2)
+        # env.goto_position(op,1)
+        pb.setJointMotorControl2(
+            self.env.robot_id,
+            jointIndex = 6,
+            controlMode = self.env.control_mode,
+            targetPosition = op["m6"],
+            targetVelocity = 0,
+            positionGain = .25, # important for position accuracy
+        )
+        # env.settle(2)
         return op
 
     def calculate_top_positions(self, curr_tower_idx, curr_pos):
@@ -379,16 +405,22 @@ class Controller():
     def run(self,env, goal_poses):
         self.client_id = env.client_id
         self.env = env
+        pb.changeDynamics(bodyUniqueId= self.env.robot_id,
+                          linkIndex = 7,
+                          physicsClientId = self.client_id,
+                          lateralFriction = 4,
+                          spinningFriction = 5,
+                          rollingFriction = 2
+                          )
+        pb.changeDynamics(bodyUniqueId= self.env.robot_id,
+                          linkIndex = 8,
+                          physicsClientId = self.client_id,
+                          lateralFriction = 4,
+                          spinningFriction = 5,
+                          rollingFriction = 2
+                          )
 
         self.setup_ik(env)
-        #modify positions of blocks to be able to avoid gripper collision
-        # for key, value in goal_poses.items():
-        #     print(f"key: {key}, value: {value}\n")
-
-        # This enables correct gripping
-        goal_poses = self.add_gripper_offset_to_poses(goal_poses)
-
-
 
         # get end effector idx for querying position
         for idx in range (pb.getNumBodies()):
@@ -424,17 +456,20 @@ class Controller():
         curr_pos_idx = self.get_stack_towers("current", self._current_block_positions,sort_by_z_height=False) # Currnet state does not need z-height sort
 
 
-        self.initial_state_tower_bases = self._get_tower_bases(curr_pos_idx)
+        self.init_base_pos_of_basic_tower = self._get_tower_bases(curr_pos_idx)
+        print("000000000000000000000000000000000000000000000000000000000000000000000000000\n")
+        print(f"\nlen: {len(self.init_base_pos_of_basic_tower)} self.init_base_pos_of_basic_tower: {self.init_base_pos_of_basic_tower}")
 
         # print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
         # print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
-        temp_towers = [
-                        ('t1',((0.12, -0.09, CUBE_SIDE/2), (0,0,0,1))),
-                        ('t2',((0.09, -0.12, CUBE_SIDE/2), (0,0,0,1))),
-                        ('t3',((-0.12,-0.09, CUBE_SIDE/2), (0,0,0,1))),
-                        ('t4',((-0.09,-0.12, CUBE_SIDE/2), (0,0,0,1))),
+        self.temp_towers_bases = [
+                        ('t1',((0.12, -0.09, CUBE_SIDE/2),(0.316227766016838, 0.0, 0.0, 0.9486832980505139))),
+                        ('t2',((0.09, -0.12, CUBE_SIDE/2),(0.44721359549995804, 0.0, 0.0, 0.8944271909999159))),
+                        ('t3',((-0.12,-0.09, CUBE_SIDE/2),(0.9486832980505138, 0.0, 0.0, 0.31622776601683794))),
+                        ('t4',((-0.09,-0.12, CUBE_SIDE/2),(0.894427190999916, 0.0, 0.0, 0.447213595499958))),
                       ]
-        self.initial_state_tower_bases = self.initial_state_tower_bases + temp_towers
+        self.initial_state_tower_bases = self.init_base_pos_of_basic_tower + self.temp_towers_bases
+        self.init_base_pos_of_temp_tower = self.temp_towers_bases
         # print(f"self.initial_state_tower_bases : {self.initial_state_tower_bases}")
         # print(f"len(self.initial_state_tower_bases) : {len(self.initial_state_tower_bases)}")
 
@@ -444,114 +479,93 @@ class Controller():
         # env._add_block((-0.12,-0.09, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t3
         # env._add_block((-0.09,-0.12, CUBE_SIDE/2), (0,0,0,1), mass = 2, side=CUBE_SIDE) #t4
 
-        # Put this in for loop to iteratively calculte:
-        #           empty position (x,y,z) of every tower &
-        #           top block position (x,y,z) of every tower
-
-        # update topblock_positions at the start
-        # top_block_loc = self.calculate_top_positions(curr_pos_idx,
-        #                                              self._current_block_positions
-        #                                             )
-        # print(top_block_loc,"\n")
-
         moves = self.tower_rearrangement_solver(goal_pos_idx, curr_pos_idx)
-
-        print(f"moves-------------: {moves}")
-
         state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
-        for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
-            # Get current state
-            print(state)
-            # Get current top blocks
-            top_cubes = self.get_top_state(state)
-            print(top_cubes)
 
-            #change state
+        #testing
+        Wp = []
+        for move in moves:
+            print(f"Move {move[0]} to {move[1]}")
+            # Get source (wp1)
+            tower_source = move[0]
+            pose = self.get_top_of_tower_pos(state, tower_source, debug_info = False)
+            # print(f"tower_src [{tower_source}], pose: {pose}")
+            wp1 = (tower_source, pose)
+
+            # Get dest (wp2)
+            tower_dest = move[1]
+            pose = self.get_top_of_tower_pos(state, tower_dest, debug_info = False)
+
+            #Increase the height of the top tower, so that the waypoint (wp2) is above the tower, and not on it
+            # print(f"BEFORE tower_dest [{tower_dest}], pose: {pose}")
+            pos = pose[0]
+            orn = pose[1]
+            pose = ((pos[0], pos[1], pos[2]+CUBE_SIDE),orn)
+            # print(f"AFTER tower_dest [{tower_dest}], pose: {pose}")
+            # print(f"tower_dest [{tower_dest}], pose: {pose}")
+            # print("")
+            wp2 = (tower_dest, pose)
+
+            #Modify state after a move so that the positions are consistent
+
+            #get source_idx, dest_idx
+            source_idx, dest_idx = self.get_src_and_dest_idx_to_update_state(move,state)
+            print(f"source_idx:{source_idx}, dest_idx:{dest_idx} ")
+
+            print(f"Old state: {state}")
             block = state[source_idx].pop()
+            print(f"Poping block: {block}")
             state[dest_idx].append(block)
-
-            # Get current state
-            print(state)
-            # Get current top blocks
-            top_cubes = self.get_top_state(state)
-            print(top_cubes)
-
-        exit()
+            print(f"Pushing block: {block}")
+            print(f"New state: {state}")
 
 
 
-        # state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
-        # print(moves)
-        # print(optimized_moves)
+            print(f"waypoint 1: {wp1}")
+            print(f"waypoint 2: {wp2}")
+            print("---------------------------------------------------")
+            Wp.append(wp1)
+            Wp.append(wp2)
+        # print(f"CUBE_SIDEx1: {CUBE_SIDE*1}")
+        # print(f"CUBE_SIDEx2: {CUBE_SIDE*2}")
+        # print(f"CUBE_SIDEx3: {CUBE_SIDE*3}")
+        # print(f"CUBE_SIDEx4: {CUBE_SIDE*4}")
+        # print(f"CUBE_SIDEx5: {CUBE_SIDE*5}")
 
-        # self.state = state
+        print("---------------------------------------------------")
+        print("---------------------------------------------------")
+        print(f"Wp:{Wp}")
+        print(f"len(Wp): {len(Wp)}")
 
-        # for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
-        #     print("\nSTATE: #####################################")
-        #     print(f"move[0]:{optimized_moves[idx]}\n")
-        #
-        #     print(f"before state:{state}")
-        #     top_cubes = self.get_top_cubes(self.state)
-        #     print(f"top_cubes_before: {top_cubes}")
-        #     source_name = f"l{source_idx+1}" if source_idx < len(goal_pos_idx) else f"t{source_idx - len(goal_pos_idx) + 1}"
-        #
-        #     dest_name = f"l{dest_idx+1}" if dest_idx < len(goal_pos_idx) else f"t{dest_idx - len(goal_pos_idx) + 1}"
-        #     block = self.state[source_idx].pop()
-        #     self.state[dest_idx].append(block)
-        #     print("MOVE <<------------>> ")
-        #     print(f"Move {idx+1}: From {source_name} to {dest_name} (Block {block})")
-        #     print(f"after state:{state}")
-        #     # Move the block
-        #     # STATE
-        #     #calculte top blocks
-        #     top_cubes = self.get_top_cubes(self.state)
-        #     print(f"top_cubes_after: {top_cubes}")
-        #     print("----------------------------------------------")
-
-        # Give the positions for l1,l2,...; t1,t2,...
-        # l1,l2 are towers; t1,t2... are temporary positions
-
-        # NOTE: This is the order here
-        # top_block_loc = [l1_pos,l2_pos,l3_pos,...ln_pos]
-        # empty_slots = top_block_loc + CUBE_SIDE/2
+        print("---------------------------------------------------")
+        print("---------------------------------------------------")
 
 
+        # See the moves
         print(f"Moves required: {len(moves)}")
         for move in moves:
             print(f"Move from {move[0]} to {move[1]}")
-            # state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
-            # for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
-            #     print(f"state:{state}")
-            #     print(f"special: idx={idx}, source_idx={source_idx}, dest_idx={dest_idx}")
-            #
-            #     top_cubes = self.get_top_cubes(state)
-            #     print(f"final:######## {top_cubes}")
-            #     print("--------------------------------------")
+
+        print("---------------------------------------------------")
+        print("---------------------------------------------------")
 
 
-        simulate_moves = True
+        simulate_moves = False
         if(simulate_moves):
             self.simulate_moves_with_state(goal_pos_idx, curr_pos_idx, len(moves))
             print(f"goal_pos_idx :f{goal_pos_idx}")
             print(f"curr_pos_idx :f{curr_pos_idx}")
-        print("----------------------------------------------")
+        print("---------------------------------------------------")
 
+        print("---------------------------------------------------")
+        print("--------Interweave With intermediate Poses---------")
+        print("---------------------------------------------------")
 
-
-        print("~~~~~~~~~~~~~ GRIPPER OFFSET ~~~~~~~~~~~~~ ")
-
-        for key, value in goal_poses.items():
-            print(f"key: {key}, value: {value}")
-        print("\n")
-
-        goal_poses = self.insert_intermediate_poses(goal_poses)
-        print("~~~~~~~~~~~~~ INTERLEAVED POSES ~~~~~~~~~~~~~ ")
-        for key, value in goal_poses.items():
-            if value==None:
-                print(f"key: {key}, value: {value}")
-            else:
-                print(f"key: {key}, value: {value[0]}")
-        print("\n")
+        if(len(Wp)>0):
+            Wp = self.insert_intermediate_poses2(Wp)
+            goal_poses = self.insert_gripper_alternations(Wp)
+        else:
+            raise Exception("No moves here")
 
         # print(f"goal_poses->>>>>>>>>>.: {goal_poses}")
         print(f"goal_poses->>>>>>>>>>.: {goal_poses.keys()}")
@@ -568,14 +582,13 @@ class Controller():
                 op = self.op_old
                 op = self.toggle_grip(op, False)
                 gripper_state = op["m6"]
-            if(key[0]=="b" or key[0]=="i"):
+            if(key[0]=="w" or key[0]=="i"):
                 op = self.inverse_kinematics_fn(value ,env.get_current_angles(),debug_info=False)
                 self.op_old = op
                 op["m6"] = gripper_state
                 print(f"op: {op}\n")
-            env.goto_position(op,5)
+            env.goto_position(op,3)
             # self.close_grip()
-            env.settle(2)
             # Make a mechanism
 
         env.settle(1000)
@@ -589,6 +602,113 @@ class Controller():
         print(f"\n{int(100*accuracy)}% of blocks near correct goal positions")
         print(f"mean|max location error = {np.mean(loc_errors):.3f}|{np.max(loc_errors):.3f}")
         print(f"mean|max rotation error = {np.mean(rot_errors):.3f}|{np.max(rot_errors):.3f}")
+
+    def get_src_and_dest_idx_to_update_state(self, move,state):
+        # TESTING:
+        # move = ['t3', 'l1']
+        # state[-2] = [10]
+        # print(f"move: {move}")
+        # print(f"state: {state}")
+        tower_source = move[0]
+        tower_dest = move[1]
+        source_idx = int(tower_source[1]) - 1
+        dest_idx = int(tower_dest[1]) - 1
+
+        if(tower_dest[0]=="t"):
+            dest_idx = dest_idx + (len(state) -4)
+        if(tower_source[0]=="t"):
+            source_idx = source_idx + (len(state) -4)
+
+        # TESTING:
+        # print(f"tower_source:{tower_source[0]}{tower_source[1]}, but source_idx: {source_idx}")
+        # print(f"tower_dest:{tower_dest[0]}{tower_dest[1]} , but dest_idx: {dest_idx}")
+
+        # TESTING: Move the block
+        # block = state[source_idx].pop()
+        # print(f"block: {block}")
+        # print(f"state: {state}")
+        # state[dest_idx].append(block)
+        # print(f"block: {block}")
+        # print(f"state: {state}")
+
+        # elif(tower_dest[0]=="l"):
+        # exit()
+
+        return source_idx, dest_idx
+
+
+    def get_top_of_tower_pos(self, state, tower_name, debug_info=True):
+        if(debug_info):
+            print(f"\nstate: {state}")
+        nBasicTowers = len(state) - 4
+        if (tower_name[0]=="l"):
+            # This is a baisc tower
+            tower_idx = int(tower_name[1])
+            if(debug_info):
+                print(f"tower_idx: {tower_idx}")
+            tower_height = len(state[tower_idx - 1])
+            if(tower_height>0):
+                top_block_num= state[tower_idx - 1][-1]
+                top_block_name = f"b{top_block_num+1}"
+            else:
+                top_block_name = "[empty]"
+            if(tower_height>0):
+                z_compoment = CUBE_SIDE*tower_height + (CUBE_SIDE/2)
+            else:
+                if(debug_info):
+                    print(f"No twower! Tower height: {tower_height}")
+                z_compoment = CUBE_SIDE*0.5 #- CUBE_SIDE
+            if(debug_info):
+                print(f"Basic tower: height of tower {tower_name} is {tower_height} and it is the {tower_idx}th tower, top_block is {top_block_name}({top_block_num}). The z_comp is CUBE_SIDE*{tower_height}={z_compoment}")
+            x = self.init_base_pos_of_basic_tower[tower_idx-1][1][0][0]
+            y = self.init_base_pos_of_basic_tower[tower_idx-1][1][0][1]
+            orn = self.init_base_pos_of_basic_tower[tower_idx-1][1][1]
+            # print(f"orn: {orn}")
+            pos = (x,y,z_compoment)
+            pose=(pos, orn)
+        elif (tower_name[0]=="t"):
+            # This is a temporary tower
+            tower_idx = int(tower_name[1]) + nBasicTowers
+            if(debug_info):
+                print(f"tower_idx: {tower_idx}")
+            tower_height = len(state[tower_idx-1])
+            if(tower_height>0):
+                top_block_num= state[tower_idx - 1][-1]
+                top_block_name = f"b{top_block_num+1}"
+            else:
+                top_block_name = "e"
+            if(debug_info):
+                print(f"Temp tower: height of tower {tower_name} is {tower_height} and it is the {tower_idx}th tower, top_block is [{top_block_name}mpty]")
+            if(tower_height>0):
+                z_compoment = CUBE_SIDE*tower_height + (CUBE_SIDE/2)
+            else:
+                z_compoment = CUBE_SIDE*0.5 #- CUBE_SIDE
+            x = self.init_base_pos_of_temp_tower[int(tower_name[1])-1][1][0][0]
+            y = self.init_base_pos_of_temp_tower[int(tower_name[1])-1][1][0][1]
+            # orn = self.init_base_orn_of_basic_tower[tower_idx-1][1][1]
+            orn = self.init_base_pos_of_temp_tower[int(tower_name[1])-1][1][1]
+            pos = (x,y,z_compoment)
+            pose=(pos, orn)
+        else:
+            raise Exception(f"Not a valid tower {tower_name}")
+        return pose
+
+
+    def get_wps(self,state):
+        wp1 = []
+        i1 = []
+        i2 = []
+        wp2 = []
+        for i in range(len(state)):
+            for j in state[i]:
+                print(f"i,j: {i, j}")
+                pose = env.get_block_pose(f'b{j+1}')
+                print(f"pose of block b{j+1}: {pose}")
+                i_pos = (pose[0][0],pose[0][1],0.2)
+                i_quat = pose[1]
+                i1 = (i_pos, i_quat)
+                print(f"pose of i_1 : {i1}")
+        exit()
 
     def get_stack_towers(self, name ,current_block_positions, sort_by_z_height):
         # print(current_block_positions)
@@ -985,8 +1105,8 @@ class Controller():
 
         # Convert to source/dest tower indices
         for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:moves_to_show]):
-            print(f"state:{state}")
-            print(f"special: idx={idx}, source_idx={source_idx}, dest_idx={dest_idx}")
+            print(f"start state:{state}")
+            # print(f"special: idx={idx}, source_idx={source_idx}, dest_idx={dest_idx}")
             # Convert indices to names for display
             source_name = f"l{source_idx+1}" if source_idx < len(goal_towers) else f"t{source_idx - len(goal_towers) + 1}"
             dest_name = f"l{dest_idx+1}" if dest_idx < len(goal_towers) else f"t{dest_idx - len(goal_towers) + 1}"
@@ -1001,50 +1121,110 @@ class Controller():
             state[dest_idx].append(block)
 
             top_cubes = self.get_top_cubes(state)
-            print(f"top_cubes: {top_cubes}")
+            # print(f"top_cubes: {top_cubes}")
 
             print(f"Move {idx+1}: From {source_name} to {dest_name} (Block {block})")
 
             # Print the state after this move
+            print("state after move:")
             for i, tower in enumerate(state):
                 tower_name = f"l{i+1}" if i < len(goal_towers) else f"t{i - len(goal_towers) + 1}"
                 print(f"{tower_name}: {tower}")
             print()
 
-    def run2(self, env, goal_poses):
-        # run the controller in the environment to achieve the goal
-        # env.goto_position([1,1,1,1,1,1], 10)
-        self.control_period = 1
-        self.clear_buffer()
-        for _ in range(100000):
-            current_image, _, _ = env.get_camera_image()
-            self.cv_window(current_image);
+    def insert_intermediate_poses2(self, waypoints_list):
+        expanded_waypoints = []
 
-            # Show image
-            if(self.show_cv_window):
-                cv2.imshow(WINDOW_NAME, self.current_image)
+        # Process all waypoints except the last one
+        for i in range(len(waypoints_list)-1):
+            # Current waypoint
+            current_wp = waypoints_list[i]
+            current_pos = current_wp[1][0]  # (x,y,z)
+            current_orn = current_wp[1][1]  # (w,x,y,z)
 
-            # print("env.get_current_angles: ",env.get_current_angles())
-            joint_angles_array = np.array(list(env.get_current_angles().values()), dtype=np.float32)
-            # print("joint_angles_array : ",joint_angles_array )
-            joint_angles_array = torch.from_numpy(joint_angles_array).float()
-            self.current_image = torch.from_numpy(self.current_image).float().permute(2, 0, 1)
+            # Next waypoint
+            next_wp = waypoints_list[i+1]
+            next_pos = next_wp[1][0]  # (x,y,z)
+            next_orn = next_wp[1][1]  # (w,x,y,z)
 
+            # Add current waypoint to result
+            expanded_waypoints.append(current_wp)
 
-            self.forward_features(self.current_image,joint_angles_array)
+            # Add first intermediate point (above current waypoint)
+            i1_pos = (current_pos[0], current_pos[1], 0.2)  # Same x,y as current, z=0.2
+            expanded_waypoints.append(('i_temp', (i1_pos, current_orn)))
 
-            pb.stepSimulation(self.client_id)
+            # Add second intermediate point (above next waypoint)
+            i2_pos = (next_pos[0], next_pos[1], 0.2)  # Same x,y as next, z=0.2
+            expanded_waypoints.append(('i_temp', (i2_pos, next_orn)))
 
-            if(self.show_cv_window):
-                # Wait for a short time and check for a key press
-                key = cv2.waitKey(1)
+        # Add the last waypoint
+        expanded_waypoints.append(waypoints_list[-1])
 
-                # Optional: Exit loop if 'q' is pressed
-                if key == ord('q'):
-                    print("q pressed")
-                    break
-        # Clean up
-        cv2.destroyAllWindows()
+        # Step 2: Convert to sequential dictionary
+        sequential_dict = {}
+
+        # Track original waypoints and intermediate points separately
+        wp_counter = 1
+        i_counter = 1
+
+        for _, pose in expanded_waypoints:
+            if pose[0][2] == 0.2:  # This is an intermediate point (z=0.2)
+                key = f'i{i_counter}'
+                i_counter += 1
+            else:  # This is an original waypoint
+                key = f'w{wp_counter}'
+                wp_counter += 1
+
+            sequential_dict[key] = pose
+        print("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+        print("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+        print(sequential_dict)
+        print("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+        print("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+
+        for key, value in sequential_dict.items():
+            print(f"key: {key}")
+        return sequential_dict
+
+        # exit()
+
+    def insert_gripper_alternations(self, waypoints_dict):
+        ordered_items = list(waypoints_dict.items())
+        result_items = []
+
+        grip_state = 'c'  # Start with close gripper
+        grip_counter = 1
+
+        # Process each item in order
+        i = 0
+        while i < len(ordered_items):
+            key, value = ordered_items[i]
+
+            # Add the original item
+            result_items.append((key, value))
+
+            # If this is a waypoint, add grip command right after it
+            if key.startswith('w'):
+                if grip_state == 'c':
+                    grip_key = f'c{grip_counter}'
+                    result_items.append((grip_key, 'grip'))
+                    grip_state = 'o'
+                else:
+                    grip_key = f'o{grip_counter}'
+                    result_items.append((grip_key, 'grip'))
+                    grip_state = 'c'
+                    grip_counter += 1
+
+            i += 1
+
+        result_dict = dict(result_items)
+
+        # print(result_dict)
+        # for key, value in result_dict.items():
+        #     print(key)
+        # Convert back to ordered dictionary
+        return dict(result_items)
 
     def insert_intermediate_poses(self, goal_poses):
         """
@@ -1145,20 +1325,15 @@ class Controller():
             else:
                 # print("c/o/k")
                 final_dict[key] = "gripper"
-        # print(new_poses.keys())
-        # print(final_dict.keys())
-        # print("--------------------------------------------")
-        # print(new_poses)
-        # print(final_dict)
-        # print("--------------------------------------------")
 
         return final_dict
 
 if __name__ == "__main__":
 
-    controller = Controller(show_simulation_window = False)
+    import evaluation as ev
+    controller = Controller(show_simulation_window = True)
 
-    env, goal_poses = ev.sample_trial(num_blocks=5, num_swaps=2, show=controller.show_simulation_window)
+    env, goal_poses = ev.sample_trial(num_blocks=6, num_swaps=4, show=controller.show_simulation_window)
     print(f"goal_poses:{goal_poses}")
 
     BASE_Z = 0.05715 # 2.25 inches

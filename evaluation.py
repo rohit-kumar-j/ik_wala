@@ -93,7 +93,7 @@ if __name__ == "__main__":
     controller = Controller()
 
     # sample a validation trial
-    env, goal_poses = sample_trial(num_blocks=20, num_swaps=1)
+    env, goal_poses = sample_trial(num_blocks=8, num_swaps=4)
 
     # check camera image
     rgba, _, _ = env.get_camera_image()
@@ -111,4 +111,3 @@ if __name__ == "__main__":
     print(f"\n{int(100*accuracy)}% of blocks near correct goal positions")
     print(f"mean|max location error = {np.mean(loc_errors):.3f}|{np.max(loc_errors):.3f}")
     print(f"mean|max rotation error = {np.mean(rot_errors):.3f}|{np.max(rot_errors):.3f}")
-    
