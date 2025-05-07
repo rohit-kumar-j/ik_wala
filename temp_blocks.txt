@@ -1,0 +1,57 @@
+def get_temp_tower_base_poses():
+    temp_positions = [
+        (0.12, -0.09),
+        (0.09, -0.12),
+        (-0.12, -0.09),
+        (-0.09, -0.12)
+    ]
+
+    bases = []
+    for (x, y) in temp_positions:
+        pos = (x, y, -0.5 * CUBE_SIDE)
+        # Calculate orientation to face the origin (0, 0)
+        theta = np.arctan2(-y, -x)  # Negate x, y to point toward (0, 0)
+        quat = _pb_to_quat(pb.getQuaternionFromEuler((0, 0, theta)))
+        bases.append((pos, quat))
+
+    return bases
+
+def sample_trial(num_blocks, num_swaps, show=True):
+    env = SimulationEnvironment(show=show)
+
+        # Get temporary base positions for stacking
+    temp_bases = get_temp_tower_base_poses()
+
+    # Initialize towers at temporary positions
+    towers = [[base] for base in temp_bases]
+    block_labels = []
+    for block in range(num_blocks):
+        # Sample support of next block from temporary towers
+        tower_idx = np.random.choice(len(towers))
+        pos, quat = towers[tower_idx][-1]
+
+        # Position block on top of support
+        new_pos = pos[:2] + (pos[2] + .0201,)
+
+        # Instantiate block
+        label = env._add_block(new_pos, quat, mass=2, side=CUBE_SIDE)
+        block_labels.append(label)
+
+        # Update new top of tower
+        towers[tower_idx].append((new_pos, quat))
+
+    # Let blocks settle
+    env.settle(1.)
+
+    # Initialize goal poses
+    goal_poses = {}
+    for label in block_labels:
+        goal_poses[label] = env.get_block_pose(label)
+
+    # Swap some poses to create a non-trivial goal
+    for _ in range(num_swaps):
+        a, b = np.random.choice(block_labels, size=2)
+        goal_poses[a], goal_poses[b] = goal_poses[b], goal_poses[a]
+
+    return env, goal_poses
+
