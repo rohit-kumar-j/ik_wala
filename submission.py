@@ -455,6 +455,31 @@ class Controller():
         # print(top_block_loc,"\n")
 
         moves = self.tower_rearrangement_solver(goal_pos_idx, curr_pos_idx)
+
+        print(f"moves-------------: {moves}")
+
+        state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
+        for idx, (source_idx, dest_idx) in enumerate(optimized_moves[:len(moves)]):
+            # Get current state
+            print(state)
+            # Get current top blocks
+            top_cubes = self.get_top_state(state)
+            print(top_cubes)
+
+            #change state
+            block = state[source_idx].pop()
+            state[dest_idx].append(block)
+
+            # Get current state
+            print(state)
+            # Get current top blocks
+            top_cubes = self.get_top_state(state)
+            print(top_cubes)
+
+        exit()
+
+
+
         # state, optimized_moves = self.prep_optimizer(goal_pos_idx, curr_pos_idx, len(moves))
         # print(moves)
         # print(optimized_moves)
@@ -1131,9 +1156,9 @@ class Controller():
 
 if __name__ == "__main__":
 
-    controller = Controller(show_simulation_window = True)
+    controller = Controller(show_simulation_window = False)
 
-    env, goal_poses = ev.sample_trial(num_blocks=2, num_swaps=1, show=controller.show_simulation_window)
+    env, goal_poses = ev.sample_trial(num_blocks=5, num_swaps=2, show=controller.show_simulation_window)
     print(f"goal_poses:{goal_poses}")
 
     BASE_Z = 0.05715 # 2.25 inches
