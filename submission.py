@@ -1333,7 +1333,7 @@ if __name__ == "__main__":
     import evaluation as ev
     controller = Controller(show_simulation_window = True)
 
-    env, goal_poses = ev.sample_trial(num_blocks=6, num_swaps=4, show=controller.show_simulation_window)
+    env, goal_poses = ev.sample_trial(num_blocks=10, num_swaps=4, show=controller.show_simulation_window)
     print(f"goal_poses:{goal_poses}")
 
     BASE_Z = 0.05715 # 2.25 inches
