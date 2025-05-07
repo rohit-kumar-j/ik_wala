@@ -137,7 +137,7 @@
     <visual>
       <origin rpy="0 -1.5707963267949 0" xyz="0 -0.058 0"/>
       <geometry>
-        <!-- This link mesh includes both the wrist and fixed finger-->
+    <!-- This link mesh includes both the wrist and fixed finger -->
         <mesh filename="meshes/section_4.stl"/>
       </geometry>
       <material name="">
@@ -190,7 +190,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <!-- This mesh is the movable finger -->
+    <!-- This mesh is the movable finger -->
         <mesh filename="meshes/gripper.stl"/>
       </geometry>
       <material name="">
@@ -207,7 +207,7 @@
     <axis xyz="0 0 -1"/>
     <parent link="section_4"/>
     <child link="section_5"/>
-  </joint>  
+  </joint>
   <link name="moving_tip">
     <!-- comment visual placeholder to see collision shape -->
     <visual>
@@ -224,7 +224,7 @@
       <mass value="1"/>
       <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
     </inertial>
-  </link>  
+  </link>
   <joint name="t7m" type="fixed">
     <origin rpy="0 0 0" xyz="-0.0155 -0.0675 0"/>
     <parent link="section_5"/>
@@ -297,4 +297,3 @@
     </plugin>
   </gazebo>
 </robot>
-
